@@ -26,11 +26,25 @@ const TERM = [
   'pagerDuty go brrr', '¿Quién tocó prod?', 'ERROR 500', 'hotfix un viernes',
   'En mi máquina sí', 'merge a main', 'CI falló', 'LGTM', 'rollback ya',
 ];
+const INC = [
+  'CI ROJO', 'DB DOWN', 'OOM KILLER', 'NULL IN PROD', 'FLAKY TEST',
+  'REDIS ON FIRE', 'DNS GONE', 'DISK FULL', 'TLS EXPIRED', 'K8S CRASHLOOP',
+  'RATE LIMIT', 'BAD MIGRATE', 'SECRET LEAK', 'QUEUE BACKLOG',
+];
 const OVER = [
   'El pager ganó esta vez.', 'Prod sigue en llamas.', 'Te van a llamar a las 3am.',
   '¿Probaste reiniciar el servicio?', 'LGTM... mentira.', 'Otro ingeniero caído.',
   'Incident channel locked.', 'Postmortem incoming.',
 ];
+function incName(w) { return INC[(Math.max(1, w) - 1) % INC.length]; }
+function rankOf(w) {
+  if (w >= 12) return 'PRINCIPAL ON-CALL';
+  if (w >= 8) return 'STAFF ON-CALL';
+  if (w >= 6) return 'SENIOR';
+  if (w >= 4) return 'MID';
+  if (w >= 2) return 'JUNIOR';
+  return 'INTERN';
+}
 
 // DO NOT replace existing keys — physical cabinet wiring.
 const CABINET_KEYS = {
@@ -133,10 +147,16 @@ const SFX = {
   wave() { beep(90, 0.15, 'square', 0.07); setTimeout(() => beep(140, 0.12), 80); },
   over() { beep(280, 0.15, 'sawtooth', 0.09, -180); setTimeout(() => beep(80, 0.35), 150); },
   win() { [523, 659, 784, 1046].forEach((f, i) => setTimeout(() => beep(f, 0.12), i * 80)); },
+  hi() { [660, 880, 1175].forEach((f, i) => setTimeout(() => beep(f, 0.09, 'triangle', 0.07), i * 70)); },
+  near() { beep(1400, 0.045, 'triangle', 0.05); },
   ui() { beep(700, 0.03); },
   pickup() { beep(1000, 0.05, 'triangle', 0.05); },
   ok() { beep(880, 0.06); setTimeout(() => beep(1100, 0.08), 50); },
 };
+function hitStop(s, t) { s.hitStop = Math.max(s.hitStop || 0, t || 0.05); }
+function camFlash(s, r, g, b, ms) {
+  try { s.cameras.main.flash(ms || 100, r, g, b, false, undefined, true); } catch (_) {}
+}
 
 function tex(sc, key, w, h, draw) {
   if (sc.textures.exists(key)) sc.textures.remove(key);
@@ -200,6 +220,14 @@ function buildTex(sc) {
   });
   tex(sc, 'xp', 10, 10, (g) => {
     g.fillStyle(C.lime, 1); g.fillCircle(5, 5, 4); g.fillStyle(C.green, 1); g.fillCircle(5, 5, 2);
+  });
+  tex(sc, 'coffee', 14, 14, (g) => {
+    g.fillStyle(C.orange, 1); g.fillRoundedRect(3, 4, 8, 8, 2);
+    g.fillStyle(0xffffff, 0.9); g.fillRect(5, 2, 2, 3); g.fillRect(8, 2, 2, 2);
+  });
+  tex(sc, 'wipe', 14, 14, (g) => {
+    g.fillStyle(C.pink, 1); g.fillCircle(7, 7, 6);
+    g.lineStyle(2, C.bg, 1); g.beginPath(); g.moveTo(3, 3); g.lineTo(11, 11); g.moveTo(11, 3); g.lineTo(3, 11); g.strokePath();
   });
   tex(sc, 'dot', 4, 4, (g) => { g.fillStyle(0xffffff, 1); g.fillCircle(2, 2, 2); });
   tex(sc, 'floor', W, H, (g) => {
@@ -682,10 +710,12 @@ function play() {
   this.score = 0; this.disp = 0; this.lives = 3; this.wave = 0;
   this.kills = 0; this.combo = 0; this.bestCombo = 0;
   this.t0 = 0; this.fireCd = 0; this.dashCd = 0; this.inv = 1; // brief spawn protection
-  this.rapid = 0; this.shield = 0; this.spawning = false;
-  this.waveClear = true; this.facing = 0; this.egg = false; this.upN = 0;
-  this.mult = 1; this.boss = null;
+  this.rapid = 0; this.shield = 0; this.coffee = 0; this.spawning = false;
+  this.waveClear = true; this.facing = 0; this.egg = false; this.afkEgg = false; this.upN = 0;
+  this.mult = 1; this.safeT = 0; this.hitStop = 0; this.boss = null;
   this.ammo = 12; this.ammoMax = 12; this.ammoRegen = 0;
+  this.stillKills = 0; this.deathCause = 'prod took you'; this.hiDing = false;
+  this.incident = ''; this._nearT = 0;
 
   this.flash = this.add.rectangle(W / 2, H / 2, W, H, C.red, 0).setDepth(2);
   R.add(this.flash);
@@ -711,9 +741,10 @@ function play() {
   this.hudScore = this.add.text(14, 8, 'PUNTAJE 0', st).setDepth(60);
   this.hudHi = this.add.text(14, 28, 'RÉCORD ' + topScore(), { ...st, fontSize: '12px', color: '#A3FF12' }).setDepth(60);
   this.hudName = this.add.text(14, 46, profile.name || 'DEV', { ...st, fontSize: '12px', color: '#DFFF00' }).setDepth(60);
-  this.hudWave = this.add.text(W / 2, 8, 'OLEADA 1', { fontFamily: F, fontSize: '16px', color: '#DFFF00', fontStyle: 'bold' }).setOrigin(0.5, 0).setDepth(60);
+  this.hudWave = this.add.text(W / 2, 8, 'OLEADA 1', { fontFamily: F, fontSize: '15px', color: '#DFFF00', fontStyle: 'bold' }).setOrigin(0.5, 0).setDepth(60);
   this.hudLives = this.add.text(W - 14, 8, '♥♥♥', { fontFamily: F, fontSize: '20px', color: '#FF3535' }).setOrigin(1, 0).setDepth(60);
-  this.hudCombo = this.add.text(W / 2, 30, '', { fontFamily: F, fontSize: '14px', color: '#A3FF12' }).setOrigin(0.5, 0).setDepth(60);
+  this.hudCombo = this.add.text(W / 2, 28, '', { fontFamily: F, fontSize: '13px', color: '#A3FF12' }).setOrigin(0.5, 0).setDepth(60);
+  this.hudMult = this.add.text(W / 2, 46, 'UPTIME x1', { fontFamily: F, fontSize: '12px', color: '#00FFE0' }).setOrigin(0.5, 0).setDepth(60);
   this.hudAmmo = this.add.text(14, H - 36, 'BALAS 12/12', { fontFamily: F, fontSize: '14px', color: '#DFFF00' }).setDepth(60);
   R.add(this.add.rectangle(14, H - 14, 140, 8, C.dim).setOrigin(0, 0.5).setDepth(60));
   this.ammoBar = this.add.rectangle(14, H - 14, 140, 8, C.lime).setOrigin(0, 0.5).setDepth(61);
@@ -727,7 +758,7 @@ function play() {
     fontFamily: F, fontSize: '36px', color: '#DFFF00', fontStyle: 'bold',
     stroke: '#050505', strokeThickness: 6,
   }).setOrigin(0.5).setDepth(45).setAlpha(0);
-  [this.hudScore, this.hudHi, this.hudName, this.hudWave, this.hudLives, this.hudCombo, this.hudAmmo, this.ammoBar, this.hudHelp, this.muteLbl, this.warn]
+  [this.hudScore, this.hudHi, this.hudName, this.hudWave, this.hudLives, this.hudCombo, this.hudMult, this.hudAmmo, this.ammoBar, this.hudHelp, this.muteLbl, this.warn]
     .forEach((o) => R.add(o));
 
   this.terms = [];
@@ -746,11 +777,13 @@ function nextWave(s) {
   s.waveClear = false;
   s.spawning = true;
   s.combo = 0;
+  s.incident = incName(s.wave);
   SFX.wave();
-  s.hudWave.setText('OLEADA ' + s.wave);
-  s.warn.setText('OLEADA ' + s.wave).setAlpha(1).setScale(0.4).setColor('#DFFF00');
-  s.tweens.add({ targets: s.warn, scale: 1.15, duration: 250, ease: 'Back.out' });
-  s.tweens.add({ targets: s.warn, alpha: 0, delay: 900, duration: 400 });
+  s.hudWave.setText('#' + s.wave + '  ' + s.incident);
+  s.warn.setText(s.incident).setAlpha(1).setScale(0.35).setColor(s.wave % 4 === 0 ? '#FF4FD8' : '#DFFF00');
+  s.tweens.add({ targets: s.warn, scale: 1.1, duration: 280, ease: 'Back.out' });
+  s.tweens.add({ targets: s.warn, alpha: 0, delay: 1000, duration: 420 });
+  toast(s, 'TICKET · OLEADA ' + s.wave, s.wave % 4 === 0 ? C.pink : C.lime);
   const n = Math.min(28, 4 + s.wave * 2 + Math.floor(s.wave / 2));
   const hasFast = s.wave >= 2;
   const hasBoss = s.wave % 4 === 0;
@@ -784,12 +817,16 @@ function spawnBug(s, type) {
   if (type === 'boss') { key = 'bugB'; hp = 10 + s.wave * 2; spd = Math.min(90, 50 + s.wave); pts = 500; scale = 1.6; }
   const e = s.bugs.create(x, y, key);
   e.setDepth(8).setScale(0).setCollideWorldBounds(true).setBounce(1);
-  e.setData('hp', hp); e.setData('pts', pts); e.setData('spd', spd); e.setData('type', type);
-  e.setData('shot', 0);
+  e.setData('hp', hp); e.setData('mhp', hp); e.setData('pts', pts); e.setData('spd', spd);
+  e.setData('type', type); e.setData('shot', 0); e.setData('phase', 1); e.setData('nm', 0);
   e.body.setCircle(key === 'bugB' ? 12 : 6);
   s.tweens.add({ targets: e, scale, duration: 200, ease: 'Back.out' });
   ring(s, x, y, type === 'boss' ? C.pink : C.red);
-  if (type === 'boss') { s.boss = e; toast(s, '⚠️ INCIDENTE CRÍTICO', C.pink); SFX.wave(); }
+  if (type === 'boss') {
+    s.boss = e;
+    toast(s, '⚠️ SEV-1 · ' + s.incident, C.pink);
+    SFX.wave();
+  }
 }
 function shoot(s) {
   if (s.fireCd > 0 || !s.alive) return;
@@ -831,9 +868,26 @@ function hitBug(s, bullet, enemy) {
   let hp = enemy.getData('hp') - 1;
   enemy.setData('hp', hp);
   boom(s, enemy.x, enemy.y, C.lime, 5); SFX.hit();
+  hitStop(s, 0.03);
   enemy.setTintFill(0xffffff);
   s.time.delayedCall(50, () => { if (enemy.active) enemy.clearTint(); });
+  // boss phase break
+  if (enemy.getData('type') === 'boss' && enemy.getData('phase') === 1 && hp <= (enemy.getData('mhp') || hp) * 0.5) {
+    enemy.setData('phase', 2);
+    enemy.setData('spd', (enemy.getData('spd') || 80) * 1.45);
+    enemy.setTint(C.pink);
+    toast(s, 'FASE 2 · ESCALADO', C.pink);
+    SFX.wave();
+    camFlash(s, 255, 79, 216, 140);
+  }
   if (hp <= 0) killBug(s, enemy);
+}
+function dropLoot(s, x, y, kind) {
+  const d = s.drops.create(x, y, kind === 'xp' ? 'xp' : kind);
+  d.setData('kind', kind).setDepth(9).setScale(0);
+  s.tweens.add({ targets: d, scale: 1.3, duration: 200, ease: 'Back.out' });
+  s.tweens.add({ targets: d, y: y - 6, duration: 500, yoyo: true, repeat: -1 });
+  s.time.delayedCall(6000, () => { if (d.active) d.destroy(); });
 }
 function killBug(s, e) {
   if (!e.active) return;
@@ -844,21 +898,36 @@ function killBug(s, e) {
   if (s.combo > s.bestCombo) s.bestCombo = s.combo;
   const gained = Math.floor(pts * (1 + s.combo * 0.05) * s.mult);
   s.score += gained;
-  if (s.score > topScore()) s.hudHi.setText('RÉCORD ' + s.score);
-  boom(s, x, y, type === 'boss' ? C.pink : C.lime, type === 'boss' ? 28 : 14);
-  ring(s, x, y, C.lime);
-  floatT(s, x, y, '+' + gained, '#DFFF00', type === 'boss');
+  if (s.score > topScore()) {
+    s.hudHi.setText('RÉCORD ' + s.score);
+    if (!s.hiDing) { s.hiDing = true; SFX.hi(); toast(s, '🏆 NUEVO RÉCORD', C.gold); }
+  }
+  const col = type === 'boss' ? C.pink : (s.combo >= 8 ? C.gold : C.lime);
+  boom(s, x, y, col, type === 'boss' ? 28 : (s.combo >= 8 ? 18 : 12));
+  ring(s, x, y, col);
+  floatT(s, x, y, '+' + gained, type === 'boss' ? '#FF4FD8' : '#DFFF00', type === 'boss');
   SFX.kill();
+  hitStop(s, type === 'boss' ? 0.12 : 0.045);
   s.cameras.main.shake(type === 'boss' ? 180 : 40, type === 'boss' ? 0.01 : 0.003);
+  if (type === 'boss') camFlash(s, 255, 79, 216, 160);
+  else if (s.combo >= 8) camFlash(s, 223, 255, 0, 60);
+
+  const spd = Math.hypot(s.player.body.velocity.x, s.player.body.velocity.y);
+  if (spd < 30) {
+    s.stillKills++;
+    if (s.stillKills >= 10 && !s.afkEgg) {
+      s.afkEgg = true; s.score += 200;
+      toast(s, '🛋️ AFK DEPLOY +200', C.gold); SFX.power();
+    }
+  } else s.stillKills = 0;
+
   const roll = Math.random();
-  if (type === 'boss' || roll < 0.18) {
-    const kinds = ['xp', 'xp', 'hp', 'rapid', 'shield'];
-    const k = type === 'boss' ? (roll < 0.5 ? 'rapid' : 'shield') : kinds[Phaser.Math.Between(0, kinds.length - 1)];
-    const d = s.drops.create(x, y, k === 'xp' ? 'xp' : k);
-    d.setData('kind', k).setDepth(9).setScale(0);
-    s.tweens.add({ targets: d, scale: 1.3, duration: 200, ease: 'Back.out' });
-    s.tweens.add({ targets: d, y: y - 6, duration: 500, yoyo: true, repeat: -1 });
-    s.time.delayedCall(6000, () => { if (d.active) d.destroy(); });
+  if (type === 'boss' || roll < 0.22) {
+    const kinds = ['xp', 'xp', 'hp', 'rapid', 'shield', 'coffee', 'wipe'];
+    let k;
+    if (type === 'boss') k = roll < 0.34 ? 'rapid' : (roll < 0.67 ? 'shield' : 'wipe');
+    else k = kinds[Phaser.Math.Between(0, kinds.length - 1)];
+    dropLoot(s, x, y, k);
   }
 }
 function hurt(s, src) {
@@ -866,16 +935,27 @@ function hurt(s, src) {
     if (s.shield > 0 && src && s.player) boom(s, s.player.x, s.player.y, C.cyan, 6);
     return;
   }
+  const t = src && src.getData ? src.getData('type') : null;
+  if (t === 'boss') s.deathCause = 'killed by SEV-1 · ' + (s.incident || 'critical');
+  else if (t === 'fast') s.deathCause = 'flaky test race condition';
+  else if (t) s.deathCause = 'OOM / null deref';
+  else s.deathCause = 'pager bolt to the face';
+
   s.lives--; s.combo = 0; s.inv = 1.5;
+  s.safeT = 0; s.mult = 1; s.stillKills = 0;
   try { SFX.hurt(); } catch (_) {}
+  hitStop(s, 0.08);
   try { s.cameras.main.shake(160, 0.012); } catch (_) {}
+  camFlash(s, 255, 53, 53, 80);
   if (s.flash) {
-    s.flash.setAlpha(0.35);
+    s.flash.setFillStyle(C.red, 1);
+    s.flash.setAlpha(0.4);
     s.tweens.add({ targets: s.flash, alpha: 0, duration: 220 });
   }
   if (s.hudLives) {
     s.hudLives.setText('♥'.repeat(Math.max(0, s.lives)) + '♡'.repeat(Math.max(0, 3 - Math.min(3, s.lives))));
   }
+  if (s.hudMult) s.hudMult.setText('UPTIME x1');
   if (s.player) floatT(s, s.player.x, s.player.y - 20, '¡AUCH!', '#FF3535', true);
   if (s.lives <= 0) die(s);
 }
@@ -883,42 +963,56 @@ function pickup(s, d) {
   if (!d.active || !s.alive) return;
   const k = d.getData('kind'); d.destroy(); SFX.pickup();
   boom(s, s.player.x, s.player.y, C.gold, 8);
-  if (k === 'xp') { s.score += 30; floatT(s, s.player.x, s.player.y, '+30 COMMIT', '#A3FF12'); }
+  if (k === 'xp') { s.score += 30 * s.mult; floatT(s, s.player.x, s.player.y, '+COMMIT', '#A3FF12'); }
   else if (k === 'hp') { if (s.lives < 5) s.lives++; toast(s, '❤️ +VIDA', C.red); }
-  else if (k === 'rapid') { s.ammo = Math.min(s.ammoMax, s.ammo + 8); s.rapid = 6; toast(s, '⚡ +BALAS / FIREHOSE', C.gold); SFX.power(); }
-  else if (k === 'shield') { s.shield = 5; s.player.setTint(C.cyan); toast(s, '🛡️ ROLLBACK SHIELD', C.cyan); SFX.power(); }
+  else if (k === 'rapid') { s.ammo = Math.min(s.ammoMax, s.ammo + 8); s.rapid = 6; toast(s, '⚡ HOTFIX FIREHOSE', C.gold); SFX.power(); }
+  else if (k === 'shield') { s.shield = 5; s.player.setTint(C.cyan); toast(s, '🛡️ LGTM SHIELD', C.cyan); SFX.power(); }
+  else if (k === 'coffee') { s.coffee = 6; s.player.setTint(C.orange); toast(s, '☕ COFFEE SPEED', C.orange); SFX.power(); }
+  else if (k === 'wipe') {
+    (s.ebullets.getChildren() || []).slice().forEach((b) => { try { b.destroy(); } catch (_) {} });
+    s.inv = Math.max(s.inv, 0.8);
+    boom(s, s.player.x, s.player.y, C.pink, 20);
+    toast(s, '♻️ ROLLBACK · CLEAR', C.pink); SFX.power();
+  }
 }
 function die(s) {
   if (s._dying || s.mode !== 'play') return;
   s._dying = true;
   s.alive = false;
-  s._wantEnd = true; // processed at start of next update — never pause physics here
   s._endSnap = {
     score: s.score | 0, kills: s.kills | 0, wave: s.wave | 0,
     combo: s.bestCombo | 0, name: String(profile.name || 'DEV'),
+    cause: String(s.deathCause || 'prod took you'),
+    rank: rankOf(s.wave | 0),
+    incident: String(s.incident || ''),
   };
   if (s.warn) s.warn.setAlpha(0);
   if (s.hudLives) s.hudLives.setText('♡♡♡');
-  // Only disable body — do NOT physics.world.pause() inside collision (freezes Phaser)
   try {
     if (s.player) {
       if (s.player.body) { s.player.body.enable = false; s.player.body.setVelocity(0, 0); }
       s.player.setTint(C.red);
     }
   } catch (_) {}
+  hitStop(s, 0.35);
+  camFlash(s, 255, 53, 53, 220);
+  try { s.cameras.main.shake(320, 0.018); } catch (_) {}
+  // brief death beat before overlay — never pause physics inside collision
+  s.time.delayedCall(420, () => { s._wantEnd = true; });
 }
 function showGameOver(scene) {
   if (!scene || scene.mode === 'end') return;
   const st = scene._endSnap || {
     score: scene.score | 0, kills: scene.kills | 0, wave: scene.wave | 0,
     combo: scene.bestCombo | 0, name: String(profile.name || 'DEV'),
+    cause: scene.deathCause || 'prod took you', rank: rankOf(scene.wave | 0),
+    incident: scene.incident || '',
   };
   scene.mode = 'end';
   scene._dying = false;
   scene._wantEnd = false;
   scene._endReady = false;
-  scene._endAt = performance.now(); // ignore input for a moment
-  // clear any pending edge flags
+  scene._endAt = performance.now();
   ['P1_1', 'P1_2', 'P1_3', 'P1_4', 'P1_5', 'P1_6', 'P1_U', 'P1_D', 'P1_L', 'P1_R', 'START1', 'START2']
     .forEach((k) => { just[k] = false; });
 
@@ -928,8 +1022,6 @@ function showGameOver(scene) {
   });
 
   try { if (scene.cameras?.main?.resetFX) scene.cameras.main.resetFX(); scene.cameras.main.setAlpha(1); } catch (_) {}
-
-  // Hide playfield objects without destroying physics groups
   try { if (scene.root) scene.root.setVisible(false); } catch (_) {}
   try { if (scene.player) scene.player.setVisible(false); } catch (_) {}
   try {
@@ -947,22 +1039,28 @@ function showGameOver(scene) {
   R.add(scene.add.rectangle(W / 2, H / 2, W + 4, H + 4, 0x050505, 1));
   try { SFX.over(); } catch (_) {}
 
-  R.add(scene.add.text(W / 2, 40, 'INCIDENTE SIN RESOLVER', {
-    fontFamily: F, fontSize: '28px', color: '#FF3535', fontStyle: 'bold',
+  R.add(scene.add.text(W / 2, 28, 'POSTMORTEM', {
+    fontFamily: F, fontSize: '26px', color: '#FF3535', fontStyle: 'bold',
+  }).setOrigin(0.5));
+  R.add(scene.add.text(W / 2, 56, st.rank || rankOf(st.wave), {
+    fontFamily: F, fontSize: '14px', color: '#FFD700', fontStyle: 'bold',
   }).setOrigin(0.5));
 
   let msg = OVER[(Math.random() * OVER.length) | 0];
   if (st.wave >= 8) msg = 'Aguantaste como crack.';
-  R.add(scene.add.text(W / 2, 78, '"' + msg + '"', {
-    fontFamily: F, fontSize: '13px', color: '#E8E4D0',
+  R.add(scene.add.text(W / 2, 82, '"' + msg + '"', {
+    fontFamily: F, fontSize: '12px', color: '#E8E4D0',
+  }).setOrigin(0.5));
+  R.add(scene.add.text(W / 2, 104, 'causa: ' + (st.cause || 'unknown'), {
+    fontFamily: F, fontSize: '12px', color: '#FF4FD8',
+  }).setOrigin(0.5));
+  R.add(scene.add.text(W / 2, 126,
+    st.name + '  ·  ' + st.score + ' pts  ·  #' + st.wave + (st.incident ? ' ' + st.incident : ''), {
+    fontFamily: F, fontSize: '15px', color: '#DFFF00',
   }).setOrigin(0.5));
 
-  R.add(scene.add.text(W / 2, 112, st.name + '  ·  ' + st.score + ' pts  ·  oleada ' + st.wave, {
-    fontFamily: F, fontSize: '18px', color: '#DFFF00',
-  }).setOrigin(0.5));
-
-  R.add(scene.add.text(W / 2, 155, 'TOP ON-CALL', {
-    fontFamily: F, fontSize: '18px', color: '#A3FF12', fontStyle: 'bold',
+  R.add(scene.add.text(W / 2, 158, 'TOP ON-CALL', {
+    fontFamily: F, fontSize: '16px', color: '#A3FF12', fontStyle: 'bold',
   }).setOrigin(0.5));
 
   for (let i = 0; i < TOP_N; i++) {
@@ -975,8 +1073,8 @@ function showGameOver(scene) {
       line = (i + 1) + '.  ' + pad + '   ' + (e.score | 0) + '   oleada ' + (e.wave | 0);
       if (String(e.name) === st.name && (e.score | 0) === st.score) col = '#DFFF00';
     }
-    R.add(scene.add.text(W / 2, 190 + i * 30, line, {
-      fontFamily: F, fontSize: '16px', color: col,
+    R.add(scene.add.text(W / 2, 186 + i * 26, line, {
+      fontFamily: F, fontSize: '15px', color: col,
     }).setOrigin(0.5));
   }
 
@@ -1109,7 +1207,14 @@ function update(_, dtMs) {
     return;
   }
 
-  if (this.mode !== 'play' || !this.alive) return;
+  if (this.mode !== 'play') return;
+  if (!this.alive) return; // death beat / delayed game-over via timer
+
+  if (this.hitStop > 0) {
+    this.hitStop -= dt;
+    return;
+  }
+
   this.t0 += dt;
   if (this.fireCd > 0) this.fireCd -= dt;
   if (this.dashCd > 0) this.dashCd -= dt;
@@ -1119,10 +1224,30 @@ function update(_, dtMs) {
     if (this.inv <= 0) this.player.setAlpha(1);
   }
   if (this.rapid > 0) this.rapid -= dt;
+  if (this.coffee > 0) {
+    this.coffee -= dt;
+    if (this.coffee <= 0 && this.shield <= 0) this.player.clearTint();
+    else if (this.coffee > 0) this.player.setTint(C.orange);
+  }
   if (this.shield > 0) {
     this.shield -= dt;
     this.player.setTint(C.cyan);
     if (this.shield <= 0) this.player.clearTint();
+  }
+
+  // uptime multiplier — survive without damage
+  this.safeT += dt;
+  const wantM = 1 + Math.min(2, Math.floor(this.safeT / 8));
+  if (wantM !== this.mult) {
+    this.mult = wantM;
+    if (this.mult > 1) {
+      toast(this, 'UPTIME x' + this.mult, C.cyan);
+      SFX.power();
+    }
+  }
+  if (this.hudMult) {
+    this.hudMult.setText('UPTIME x' + this.mult);
+    this.hudMult.setColor(this.mult >= 3 ? '#FFD700' : (this.mult === 2 ? '#00FFE0' : '#6a6a55'));
   }
 
   let dx = 0, dy = 0;
@@ -1134,7 +1259,7 @@ function update(_, dtMs) {
     const len = Math.hypot(dx, dy);
     dx /= len; dy /= len;
     this.facing = Math.atan2(dy, dx);
-    const spd = 240 * (this.rapid > 0 ? 1.15 : 1);
+    const spd = 240 * (this.rapid > 0 ? 1.15 : 1) * (this.coffee > 0 ? 1.35 : 1);
     this.player.setAcceleration(dx * 1400, dy * 1400);
     this.player.setMaxVelocity(spd);
   } else this.player.setAcceleration(0, 0);
@@ -1148,7 +1273,7 @@ function update(_, dtMs) {
     if (this.upN >= 5 && !this.egg) {
       this.egg = true; this.score += 500; toast(this, '🦄 RAISE APROBADO +500', C.gold); SFX.power();
     }
-  }
+  } else if (!held.P1_U) this.upN = 0;
 
   this.bullets.getChildren().slice().forEach((b) => {
     if (!b.active) return;
@@ -1169,15 +1294,33 @@ function update(_, dtMs) {
     const ang = Phaser.Math.Angle.Between(e.x, e.y, this.player.x, this.player.y);
     this.physics.velocityFromRotation(ang + Math.sin(this.t0 * 5 + e.x) * 0.4, spd, e.body.velocity);
     e.setRotation(ang);
+
+    // near-miss
+    const dist = Phaser.Math.Distance.Between(this.player.x, this.player.y, e.x, e.y);
+    if (dist > 28 && dist < 52 && !e.getData('nm') && this.t0 - this._nearT > 0.4) {
+      e.setData('nm', 1);
+      this._nearT = this.t0;
+      const bonus = Math.floor(50 * this.mult);
+      this.score += bonus;
+      floatT(this, e.x, e.y - 16, 'NEAR MISS +' + bonus, '#00FFE0');
+      SFX.near();
+      ring(this, this.player.x, this.player.y, C.cyan);
+    }
+
     if (e.getData('type') === 'boss') {
+      const phase = e.getData('phase') || 1;
       let sh = (e.getData('shot') || 0) - dt;
       if (sh <= 0) {
-        sh = 1.4;
-        for (let i = -1; i <= 1; i++) {
+        sh = phase === 2 ? 0.7 : 1.4;
+        const spread = phase === 2 ? 2 : 1;
+        for (let i = -spread; i <= spread; i++) {
           const bl = this.ebullets.create(e.x, e.y, 'bolt');
           bl.setTint(C.pink).setDepth(14);
-          this.physics.velocityFromRotation(ang + i * 0.25, 180, bl.body.velocity);
+          this.physics.velocityFromRotation(ang + i * (phase === 2 ? 0.32 : 0.25), phase === 2 ? 220 : 180, bl.body.velocity);
           bl.setData('life', 2.5);
+        }
+        if (phase === 2 && Math.random() < 0.45) {
+          spawnBug(this, Math.random() < 0.5 ? 'fast' : 'normal');
         }
       }
       e.setData('shot', sh);
@@ -1191,11 +1334,18 @@ function update(_, dtMs) {
 
   if (!this.spawning && this.bugs.countActive() === 0 && !this.waveClear) {
     this.waveClear = true;
-    this.score += 100 * this.wave;
-    toast(this, '✓ OLEADA ' + this.wave + ' LIMPIA +' + (100 * this.wave), C.lime);
-    SFX.power();
-    this.cameras.main.flash(120, 223, 255, 0);
-    this.time.delayedCall(1100, () => { if (this.alive) nextWave(this); });
+    const bonus = 100 * this.wave * this.mult;
+    this.score += bonus;
+    hitStop(this, 0.22);
+    toast(this, '✓ DEPLOYED · +' + bonus, C.lime);
+    SFX.win();
+    camFlash(this, 223, 255, 0, 180);
+    this.cameras.main.shake(120, 0.008);
+    for (let i = 0; i < 10; i++) {
+      const px = Phaser.Math.Between(80, W - 80), py = Phaser.Math.Between(80, H - 80);
+      this.time.delayedCall(i * 40, () => { if (this.alive) boom(this, px, py, C.lime, 6); });
+    }
+    this.time.delayedCall(1200, () => { if (this.alive) nextWave(this); });
   }
 
   if (this.disp < this.score) {
@@ -1203,7 +1353,12 @@ function update(_, dtMs) {
     this.hudScore.setText('PUNTAJE ' + this.disp);
   }
   this.hudLives.setText('♥'.repeat(Math.max(0, this.lives)) + '♡'.repeat(Math.max(0, 3 - Math.min(3, this.lives))));
-  this.hudCombo.setText(this.combo > 1 ? 'COMBO x' + this.combo : (this.rapid > 0 ? '⚡ FIREHOSE' : (this.shield > 0 ? '🛡️ SHIELD' : '')));
+  let status = '';
+  if (this.combo > 1) status = 'COMBO x' + this.combo;
+  else if (this.coffee > 0) status = '☕ COFFEE';
+  else if (this.rapid > 0) status = '⚡ HOTFIX';
+  else if (this.shield > 0) status = '🛡️ LGTM';
+  this.hudCombo.setText(status);
   const am = Math.floor(this.ammo);
   this.hudAmmo.setText('BALAS ' + am + '/' + this.ammoMax);
   this.hudAmmo.setColor(am <= 3 ? '#FF3535' : (am <= 6 ? '#FFD700' : '#DFFF00'));
